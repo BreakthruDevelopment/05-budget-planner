@@ -11,6 +11,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    globalSetup: ["./test/global-setup.ts"],
     // Integration files share one database and run migrations; keep them from racing.
     fileParallelism: false,
     include: ["src/**/*.test.ts", "test/**/*.test.ts"],
