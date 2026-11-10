@@ -1,15 +1,26 @@
-# 30 Apps Template
+# Personal Budget Planner
 
-The starting point for every app in Breakthru Ventures' **30 apps in 30 days** portfolio. Each app is a
-responsive web app with a Postgres database, sign-in with roles, one AI feature, and a single container
-image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
+A private demo-bank budget planner in Breakthru Ventures' **30 apps in 30 days** portfolio.
 
 ## What this app does
 
-_Each app replaces this section: the customer problem, who uses it, and what the AI feature does._
+Personal Budget Planner imports deterministic demo bank transactions, applies merchant rules, stores recurring category budgets, and computes monthly cash flow. Every financial query is scoped to the acting user, including for admins; admins see counts only. **Demo and sandbox data only. Never connect a real bank.**
 
-The template ships an example "items" feature: users manage their own items, admins see everyone's, and
-an AI summary describes the list.
+This data/API release includes the 14 fixed categories, demo connect/sync/disconnect, keyset transaction pagination, recategorization with “always for this merchant”, budgets, cash flow, admin counts, and demo workspace loading. Dedicated UI, AI and encrypted Plaid sandbox support follow in separate issues. `/overview`, `/transactions`, `/budgets` and `/accounts` currently expose authenticated data views.
+
+Imports commit each page and its cursor together; provider IDs are unique per item. Replays do not duplicate rows. Pending-to-posted imports preserve user/rule categories. Concurrent refreshes return 409, abandoned leases expire after 60 seconds, and each request starts pages for at most 20 seconds. Refreshes are capped at six per user per hour; users may have three items, 5,000 transactions and 200 rules. Amounts are integer cents, positive for inflow and negative for outflow. Cash-flow totals use posted USD transactions and exclude transfers.
+
+Shared T2 helpers and tests were ported directly from `30-apps-template` main (`55a9cef`); the helper migration was regenerated in this repository before the domain migration. Template rate kinds remain for the ported tests; budgeting adds `sync`, `categorize`, `explain`, `rule_write`, and `demo_load`.
+
+`POST /api/bank/items` accepts `{ "demo": true }`; sync at `POST /api/bank/items/:id/sync`, disconnect at `DELETE /api/bank/items/:id`. `GET /api/transactions` accepts `month`, `account`, `category`, `review=true`, and `cursor` (100 rows/page). `PATCH /api/transactions/:id` accepts `{ "categorySlug": "dining", "always": true }`. `GET/PUT /api/budgets` reads/replaces limits (`{ "budgets": [{ "categorySlug": "dining", "monthlyLimitCents": 25000 }] }`). `GET /api/cashflow?month=YYYY-MM` returns cents, category budgets/remaining/prior month, top merchants and counts. All mutations require a matching Origin. Admins can use `GET /api/admin/counts` and `POST /api/admin/demo`.
+
+For local demo users, first create an admin with `pnpm db:seed`, then run:
+
+```sh
+DEMO_SEED=yes APP_URL=http://localhost:3000 DEMO_PASSWORD='<choose-a-local-password>' SEED_ADMIN_EMAIL=you@example.test pnpm seed:demo
+```
+
+The seed refuses production app/database hosts before loading database code. The live admin button uses a separate authorized loader. It creates `alex@demo.breakthru.test`, `blair@demo.breakthru.test` and `casey@demo.breakthru.test`, with 90 days of demo transactions and recurring budgets. Repeated loads replace only marked demo financial records and preserve existing credentials. Public signups cannot claim reserved demo identities. No bank secrets are stored for demo items.
 
 ## Architecture
 
@@ -75,8 +86,7 @@ IBM Plex Mono (`font-mono`). Set the app's name once in `src/lib/app-config.ts` 
 | `Panel` | `src/components/ui/` | Titled panel; `collapsible` adds a "Show all" toggle (small client component) |
 | `DemoBadge` | `src/components/ui/` | "Demo data" label for seeded or demo content |
 
-The header links come from `NAV_LINKS` in `src/lib/app-config.ts`; each app must edit that list (the template's
-`/dashboard` and `/admin` links break if the app deletes those pages).
+The header links come from `NAV_LINKS` in `src/lib/app-config.ts`.
 
 Shared button and field classes are in `src/components/ui/styles.ts` (44px minimum height). Don't add `loading.tsx` or
 `<Suspense>` above a page that calls `requireRoleOrRedirect()` or `notFound()`.

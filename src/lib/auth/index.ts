@@ -1,4 +1,6 @@
 import "server-only";
+import { APIError } from "better-auth/api";
+import { isDemoEmail, MARKER } from "@/lib/demo-identity";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
@@ -23,6 +25,16 @@ function createAuth() {
         verification: schema.verification,
       },
     }),
+    databaseHooks: {
+      user: {
+        create: { before: async (user) => {
+          if (isDemoEmail(user.email) || user.image === MARKER) throw new APIError("BAD_REQUEST", { message: "Reserved demo identity" });
+        } },
+        update: { before: async (user) => {
+          if ((user.email && isDemoEmail(user.email)) || user.image === MARKER) throw new APIError("BAD_REQUEST", { message: "Reserved demo identity" });
+        } },
+      },
+    },
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 10,

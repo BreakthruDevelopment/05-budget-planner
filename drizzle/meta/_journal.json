@@ -8,6 +8,20 @@
       "when": 1793690781030,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794289502676,
+      "tag": "0001_shared-helpers",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794289930784,
+      "tag": "0002_budget-schema",
+      "breakpoints": true
     }
   ]
 }
