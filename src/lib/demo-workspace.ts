@@ -11,6 +11,9 @@ import { MARKER, DEMO_EMAIL_DOMAIN } from "@/lib/demo-identity";
 import { ConflictError } from "@/lib/errors";
 import { advisoryLock, consumeRate } from "@/lib/usage";
 import { ownedBy } from "@/lib/owned";
+/** Postgres unique violation, possibly wrapped by Drizzle (`cause`). */
+const isUniqueViolation = (e: unknown): boolean =>
+  typeof e === "object" && e !== null && ((e as { code?: unknown }).code === "23505" || isUniqueViolation((e as { cause?: unknown }).cause));
 const inputSchema = z.object({ password: z.string().min(10).max(128).optional() }).strict();
 /** All changes are atomic; collisions with unrelated identities fail without modifying any of them. */
 export async function loadDemoWorkspace(actor: Actor, input: unknown = {}) {
@@ -28,7 +31,13 @@ export async function loadDemoWorkspace(actor: Actor, input: unknown = {}) {
       const previous = existing.find(u => u.email === email);
       const id = previous?.id ?? randomUUID();
       if (!previous) {
-        await tx.insert(schema.user).values({ id, email, name: ["Alex Demo", "Blair Demo", "Casey Demo"][i], image: MARKER });
+        // A real account may have taken the demo email since the check above: report a conflict, not a crash.
+        try {
+          await tx.insert(schema.user).values({ id, email, name: ["Alex Demo", "Blair Demo", "Casey Demo"][i], image: MARKER });
+        } catch (e) {
+          if (isUniqueViolation(e)) throw new ConflictError("A demo identity is unavailable.");
+          throw e;
+        }
         await tx.insert(schema.account).values({ id: randomUUID(), accountId: id, providerId: "credential", userId: id, password: hashedPassword });
       }
       // Existing users keep credentials and sessions. The loader only replaces its own marked financial fixtures.
