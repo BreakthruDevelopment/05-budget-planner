@@ -1,5 +1,5 @@
 {
-  "name": "30-apps-template",
+  "name": "05-budget-planner",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.mts",
+    "seed:demo": "NODE_OPTIONS=--conditions=react-server tsx scripts/seed-demo.mts",
     "db:seed": "tsx scripts/seed.mts",
     "smoke": "bash scripts/smoke.sh"
   },

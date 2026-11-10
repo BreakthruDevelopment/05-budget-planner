@@ -1,3 +1,5 @@
+import { DemoButton } from "./demo-button";
+import { adminCounts } from "@/lib/budget";
 import { desc } from "drizzle-orm";
 import type { Metadata } from "next";
 import { type Column, DataList, PageIntro, Panel, StatGrid, StatTile } from "@/components/ui";
@@ -8,7 +10,8 @@ export const metadata: Metadata = { title: "Admin" };
 export const dynamic = "force-dynamic";
 
 export default async function AdminPage() {
-  await requireRoleOrRedirect("admin");
+  const actor = await requireRoleOrRedirect("admin");
+  const counts = await adminCounts(actor);
   const users = await db()
     .select({
       id: schema.user.id,
@@ -41,8 +44,12 @@ export default async function AdminPage() {
   return (
     <>
       <PageIntro section="Admin" title="Users" description="Everyone who has signed up, newest first." />
+      <Panel title="Demo workspace"><DemoButton /></Panel>
       <StatGrid>
-        <StatTile value={users.length} label="Users" tone="accent" />
+        <StatTile value={counts.users} label="Users" tone="accent" />
+        <StatTile value={counts.items.demo + counts.items.plaid} label="Linked items" />
+        <StatTile value={counts.transactions} label="Transactions" />
+        <StatTile value={`${counts.aiCalls} / ${counts.aiDailyCap}`} label="AI calls today / cap" />
         <StatTile value={users.filter((u) => u.role === "admin").length} label="Admins" />
       </StatGrid>
       <Panel title="All users" count={users.length}>

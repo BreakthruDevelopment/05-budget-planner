@@ -16,6 +16,7 @@ export async function GET() {
   const body = {
     status: ok ? "ok" : "degraded",
     app: process.env.APP_NAME ?? "30-apps-template",
+    bank: "demo",
     version: process.env.APP_VERSION ?? "dev",
     cloud: process.env.CLOUD ?? "local",
     checks: {

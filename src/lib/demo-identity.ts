@@ -3,7 +3,7 @@
  * Set MARKER per app (`urn:breakthru:<slug>-demo:v1`): the loader stores it in `user.image` so it only ever
  * replaces accounts it created, and refuses to touch an unrelated account that has a demo email.
  */
-export const MARKER = "urn:breakthru:demo:v1";
+export const MARKER = "urn:breakthru:budget-planner-demo:v1";
 export const DEMO_EMAIL_DOMAIN = "demo.breakthru.test";
 
 export function isDemoEmail(email: unknown): boolean {
