@@ -126,6 +126,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ m
         )}
       </Panel>
       <ExplainPanel
+        key={month}
         month={month}
         initial={explanation}
         canExplain={explainableMonths().includes(month)}
