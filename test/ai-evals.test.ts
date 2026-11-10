@@ -133,8 +133,15 @@ describe("eval 4: advice and invented numbers are replaced", () => {
     expect(out.data.summary).toContain("$3180.00");
     expect(JSON.stringify(info.mock.calls)).toContain("invented_number");
   });
-  it("rejects percentages, which the server never computed", () => {
-    expect(numbersMatch("Dining rose 33% this month.", stats())).toBe(false);
+  it.each([
+    "Dining rose 33% this month.", "Dining rose 64 percent.", "Dining rose 10 percent.", "Dining rose 10 per cent.", "Dining rose 10 pct.",
+    "You spent nine thousand dollars on dining.", "Dining was $1.2 million.", "Dining was $5k.", "Dining was 5K.", "Dining doubled.",
+    "Dining more than tripled.", "About 3 times your dining budget.", "Dining ran at half the budget.", "Twice the budget went to dining.",
+    "Dining cost four hundred dollars.", "Dining cost twelve bucks.",
+  ])("rejects ratios, scales and spelled-out amounts the server never computed: %s", (text) => {
+    expect(numbersMatch(text, stats()), text).toBe(false);
+  });
+  it("accepts server figures", () => {
     expect(numbersMatch("Dining was $412.50, near the $412.00 mark.", stats())).toBe(true);
   });
   it("never logs names or amounts", async () => {

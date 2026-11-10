@@ -14,6 +14,22 @@ describe("advice guardrails", () => {
     "What is your APR?",
     "Open a high-yield savings account.",
     "You are reckless with money.",
+    "Pay off your debt first.",
+    "Try borrowing less.",
+    "A line of credit could help.",
+    "Talk to a financial advisor.",
+    "Talk to a financial planner.",
+    "Ask an accountant.",
+    "Consider using a budgeting app like YNAB.",
+    "Consider getting a side job.",
+    "Consider trying a new plan.",
+    "Look at Klarna or Affirm.",
+    "Buy now, pay later is tempting.",
+    "Use BNPL sparingly.",
+    "Shop around for cheaper insurance.",
+    "Your deductible expenses.",
+    "You could switch to another bank.",
+    "Pay down the balance.",
   ])("flags %s", (text) => {
     expect(hasAdvice(text)).toBe(true);
   });

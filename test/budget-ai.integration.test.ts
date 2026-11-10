@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { generate } from "@/lib/ai";
+import { AiError } from "@/lib/ai/types";
 import { resetEnvCache } from "@/lib/env";
 
 type Gen = typeof generate;
@@ -74,7 +75,7 @@ describe.skipIf(!url)("budget AI (Postgres)", () => {
       const gen = model((prompt) => ({ items: [...prompt.matchAll(/"id":"(T\d+)","name":"([^"]+)"/g)].map(([, id, name]) => ({ id, category: name === "Demo Market" ? "groceries" : name === "Demo Cafe" ? "dining" : "other", confidence: name === "XQZ Holdings" ? 0.3 : 0.9 })) }));
       const result = await ai.categorizeTransactions(alice, gen);
       expect(gen.prompts).toHaveLength(1);
-      expect(result).toMatchObject({ sent: 3, applied: 2, suggested: 1, unchanged: 0, remaining: 1, demo: false, disclaimer: "AI summary, not financial advice" });
+      expect(result).toMatchObject({ sent: 3, applied: 2, suggested: 1, unchanged: 0, remaining: 0, demo: false, disclaimer: "AI summary, not financial advice" });
       expect(await row(market)).toMatchObject({ category_slug: "groceries", category_source: "ai", ai_confidence: "0.90" });
       expect(await row(lowAi)).toMatchObject({ category_slug: "dining", category_source: "ai" });
       expect(await row(mystery)).toMatchObject({ category_slug: "other", category_source: "ai", ai_confidence: "0.30" });
@@ -151,12 +152,37 @@ describe.skipIf(!url)("budget AI (Postgres)", () => {
       expect(await sql`select count from daily_usage where kind='ai' and day=(now() at time zone 'utc')::date`).toMatchObject([{ count: 2 }]);
     });
 
-    it("refunds the hourly and daily slot when the model call fails", async () => {
+    it("refunds the slot only when no provider request was made", async () => {
       await seed(alice, "Demo Market", -5000);
-      const failing = (async () => { throw new Error("provider down"); }) as unknown as Gen;
-      await expect(ai.categorizeTransactions(alice, failing)).rejects.toThrow("provider down");
+      const rejected = (async () => { throw new AiError("too long", "input_rejected"); }) as unknown as Gen;
+      await expect(ai.categorizeTransactions(alice, rejected)).rejects.toThrow("too long");
       expect(await sql`select 1 from rate_event where user_id=${alice.id}`).toHaveLength(0);
       expect(await sql`select count from daily_usage where kind='ai' and day=(now() at time zone 'utc')::date`).toMatchObject([{ count: 0 }]);
+      for (const err of [new AiError("bad json", "invalid_output"), new AiError("slow", "provider", "timeout")]) {
+        const failing = (async () => { throw err; }) as unknown as Gen;
+        await expect(ai.categorizeTransactions(alice, failing)).rejects.toThrow(err.message);
+      }
+      expect(await sql`select 1 from rate_event where user_id=${alice.id}`).toHaveLength(2);
+      expect(await sql`select count from daily_usage where kind='ai' and day=(now() at time zone 'utc')::date`).toMatchObject([{ count: 2 }]);
+    });
+
+    it("does not re-send low-confidence rows on every click; remaining reaches 0; a changed row is eligible again", async () => {
+      const mystery = await seed(alice, "XQZ Holdings", -2000);
+      const weak = model((prompt) => ({ items: [...prompt.matchAll(/"id":"(T\d+)"/g)].map(([, id]) => ({ id, category: "other", confidence: 0.3 })) }));
+      expect(await ai.categorizeTransactions(alice, weak)).toMatchObject({ sent: 1, suggested: 1, remaining: 0 });
+      const again = model();
+      expect(await ai.categorizeTransactions(alice, again)).toMatchObject({ sent: 0, remaining: 0 });
+      expect(again.prompts).toHaveLength(0);
+      await sql`update txn set updated_at = now() + interval '1 second', name = 'XQZ Holdings Ltd' where id=${mystery}`;
+      expect(await ai.countCategorizable(alice)).toBe(1);
+      expect(await ai.categorizeTransactions(alice, model())).toMatchObject({ sent: 1 });
+    });
+
+    it("never overwrites a confident AI row that became ineligible", async () => {
+      const id = await seed(alice, "Demo Market", -5000, { source: "ai", slug: "groceries", conf: "0.90" });
+      const gen = model();
+      expect(await ai.categorizeTransactions(alice, gen)).toMatchObject({ sent: 0 });
+      expect(await row(id)).toMatchObject({ category_slug: "groceries", ai_confidence: "0.90" });
     });
 
     it("works offline in demo mode, from the user's own rows", async () => {
@@ -178,7 +204,7 @@ describe.skipIf(!url)("budget AI (Postgres)", () => {
       await sql`insert into budget (owner_id,category_slug,monthly_limit_cents) values (${owner.id},'dining',25000)`;
     }
 
-    it("a second POST with unchanged data makes no call; the 3rd regeneration is 429", async () => {
+    it("a second POST with unchanged data makes no call; the 3rd regenerate:true is 429", async () => {
       await seedMonth(alice);
       const gen = model(() => goodExplanation);
       const first = await ai.explainCashflow(alice, { month }, gen);
@@ -189,18 +215,21 @@ describe.skipIf(!url)("budget AI (Postgres)", () => {
       expect(gen.prompts).toHaveLength(1);
       expect(await sql`select 1 from rate_event where user_id=${alice.id} and kind='explain'`).toHaveLength(1);
 
+      // Changed data without regenerate: the cached text comes back flagged stale; nothing is spent.
       await seed(alice, "Demo Market", -1000, { source: "user", slug: "groceries" });
+      expect(await ai.explainCashflow(alice, { month }, gen)).toMatchObject({ stale: true, regenerationsLeft: 2, generatedAt: first.generatedAt });
       expect((await ai.getCachedExplanation(alice, month))?.stale).toBe(true);
-      expect(await ai.explainCashflow(alice, { month }, gen)).toMatchObject({ stale: false, regenerationsLeft: 1 });
+      expect(gen.prompts).toHaveLength(1);
+
+      expect(await ai.explainCashflow(alice, { month, regenerate: true }, gen)).toMatchObject({ stale: false, regenerationsLeft: 1 });
       expect(await ai.explainCashflow(alice, { month, regenerate: true }, gen)).toMatchObject({ regenerationsLeft: 0 });
       expect(gen.prompts).toHaveLength(3);
       const refused = model(() => goodExplanation);
       await expect(ai.explainCashflow(alice, { month, regenerate: true }, refused)).rejects.toMatchObject({ status: 429 });
+      // At the limit a plain POST is not an error: it returns the last text, flagged stale when the numbers moved.
       await seed(alice, "Demo Market", -1000, { source: "user", slug: "groceries" });
-      await expect(ai.explainCashflow(alice, { month }, refused)).rejects.toMatchObject({ status: 429 });
+      expect(await ai.explainCashflow(alice, { month }, refused)).toMatchObject({ stale: true, regenerationsLeft: 0 });
       expect(refused.prompts).toHaveLength(0);
-      // The last text stays readable; only regenerating is blocked.
-      expect(await ai.getCachedExplanation(alice, month)).toMatchObject({ stale: true, regenerationsLeft: 0 });
     });
 
     it("only quotes server numbers: an invented figure and advice are replaced before they are stored", async () => {
@@ -251,13 +280,30 @@ describe.skipIf(!url)("budget AI (Postgres)", () => {
       expect(view.data.overBudget.map((o) => o.category)).toEqual(["dining"]);
     });
 
-    it("refunds quota and the regeneration slot when the model call fails", async () => {
+    it("refunds quota and the regeneration slot only when no provider request was made", async () => {
       await seedMonth(alice);
       await ai.explainCashflow(alice, { month }, model(() => goodExplanation));
-      const failing = (async () => { throw new Error("provider down"); }) as unknown as Gen;
-      await expect(ai.explainCashflow(alice, { month, regenerate: true }, failing)).rejects.toThrow("provider down");
+      const rejected = (async () => { throw new AiError("too long", "input_rejected"); }) as unknown as Gen;
+      await expect(ai.explainCashflow(alice, { month, regenerate: true }, rejected)).rejects.toThrow("too long");
       expect(await sql`select regenerations from cashflow_summary where owner_id=${alice.id}`).toMatchObject([{ regenerations: 0 }]);
       expect(await sql`select 1 from rate_event where user_id=${alice.id} and kind='explain'`).toHaveLength(1);
+      const timedOut = (async () => { throw new AiError("slow", "provider", "timeout"); }) as unknown as Gen;
+      await expect(ai.explainCashflow(alice, { month, regenerate: true }, timedOut)).rejects.toThrow("slow");
+      expect(await sql`select regenerations from cashflow_summary where owner_id=${alice.id}`).toMatchObject([{ regenerations: 1 }]);
+      expect(await sql`select 1 from rate_event where user_id=${alice.id} and kind='explain'`).toHaveLength(2);
+    });
+
+    it("does not store demo text that stepped in for a failed live provider", async () => {
+      process.env.AI_PROVIDER = "gemini"; process.env.GEMINI_API_KEY = "test-key"; resetEnvCache();
+      vi.stubGlobal("fetch", async () => new Response("{}", { status: 503 }));
+      try {
+        await seedMonth(alice);
+        const view = await ai.explainCashflow(alice, { month });
+        expect(view).toMatchObject({ mode: "demo", demo: true, stale: false });
+        expect(view.data.summary).toContain("recorded, not from a live model");
+        expect(await sql`select 1 from cashflow_summary where owner_id=${alice.id}`).toHaveLength(0);
+        expect(await ai.getCachedExplanation(alice, month)).toBeNull();
+      } finally { process.env.AI_PROVIDER = "demo"; delete process.env.GEMINI_API_KEY; resetEnvCache(); }
     });
 
     it("stops at the daily cap before any model call", async () => {
@@ -277,5 +323,13 @@ describe.skipIf(!url)("budget AI (Postgres)", () => {
     const spend = (slug: string) => flow.categories.find((c) => c.categorySlug === slug)!.spendCents;
     expect([spend("dining"), spend("other"), spend("groceries")]).toEqual([0, 5000, 3000]);
     expect(flow.counts.needsReview).toBe(1);
+  });
+
+  it("a low-confidence 'transfer' guess on an outflow still counts as other spend", async () => {
+    await seed(alice, "Mystery Payment", -5000, { source: "ai", slug: "transfer", conf: "0.40" });
+    await seed(alice, "Card Payment", -2000, { source: "ai", slug: "transfer", conf: "0.90" });
+    const flow = await data.cashFlow(alice, month);
+    expect(flow.spendCents).toBe(5000);
+    expect(flow.categories.find((c) => c.categorySlug === "other")!.spendCents).toBe(5000);
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { guardExplanation } from "./budget-tasks";
 import { buildCategorizePrompt, buildExplainPrompt, CATEGORIZE_PROMPT_LIMIT, clean, EXPLAIN_PROMPT_LIMIT, type FlowStats, guardProposals, numbersMatch } from "./budget-tasks";
 
 const row = (i: number, name: string, amountCents = -2500) => ({ id: `r${i}`, name, merchantName: name, amountCents, providerCategory: "FOOD_AND_DRINK" });
@@ -67,11 +68,29 @@ describe("explanation numbers", () => {
   it("rejects figures the server did not compute", () => {
     for (const text of ["You spent $9,999.", "Dining rose 37%.", "About 450 dollars on dining.", "Roughly 7 purchases."]) expect(numbersMatch(text, stats), text).toBe(false);
   });
+  it("strips only whole-word merchant names of 4+ characters that contain a letter, and only for the number check", () => {
+    const digits = { ...stats, topMerchants: [{ merchantName: "9999", spendCents: 100 }] };
+    expect(numbersMatch("Spent $9999 at 9999.", digits)).toBe(false);
+    const short = { ...stats, topMerchants: [{ merchantName: "A1", spendCents: 100 }] };
+    expect(numbersMatch("Spent $77 at A1.", short)).toBe(false);
+    const partial = { ...stats, topMerchants: [{ merchantName: "Store", spendCents: 100 }] };
+    expect(numbersMatch("Spent $9999 at Stores.", partial)).toBe(false);
+    expect(numbersMatch("Spent $9999 at Store #123.", { ...stats, topMerchants: [{ merchantName: "Store #123", spendCents: 100 }] })).toBe(false);
+    expect(numbersMatch("Half Moon Cafe cost $412.00.", { ...stats, topMerchants: [{ merchantName: "Half Moon Cafe", spendCents: 41200 }] })).toBe(true);
+  });
   it("keeps the explain prompt within its cap, with merchant names stripped", () => {
     const many = { ...stats, topMerchants: Array.from({ length: 5 }, (_, i) => ({ merchantName: `<b>M${i}</b>\n${"x".repeat(300)}`, spendCents: 100 })) };
     const prompt = buildExplainPrompt(many);
     expect(prompt.length).toBeLessThanOrEqual(EXPLAIN_PROMPT_LIMIT);
     expect(prompt).not.toMatch(/<b>/);
     expect(prompt).toContain('"spent":"$412.00"');
+  });
+});
+
+describe("advice check runs on the raw text", () => {
+  const raw = { headline: "Month", summary: "Get a Credit Card with rewards.", highlights: [], overBudget: [], tip: "Review one category weekly." };
+  it("is not excused by a merchant with the same name", () => {
+    const s = { ...stats, topMerchants: [{ merchantName: "Credit Card", spendCents: 100 }] };
+    expect(guardExplanation(raw, s)).toMatchObject({ mode: "fallback", codes: ["advice_language"] });
   });
 });

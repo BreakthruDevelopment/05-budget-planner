@@ -217,20 +217,31 @@ function allowedFigures(s: FlowStats) {
   return { cents: [...cents], plain };
 }
 
-/** Names that legitimately contain digits or advice-like words ("Tax Prep Co", "Store #123") are removed before checking. */
+/**
+ * For the number check only: remove whole-word merchant names (4+ characters, at least one letter) so "Store #123"
+ * can be quoted. Short or purely numeric names are never stripped, or a merchant called "9999" would launder "$9999".
+ * The advice check never strips anything: a merchant named "Credit Card" doesn't excuse "get a credit card".
+ */
 function withoutMerchants(text: string, s: FlowStats): string {
   let out = text;
   for (const m of s.topMerchants) {
     const name = clean(m.merchantName, 80);
-    if (name) out = out.split(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")).join(" ");
+    if (name.length < 4 || !/\p{L}/u.test(name)) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "giu"), " ");
   }
   return out;
 }
+
+// Ratios, scales and spelled-out amounts are numbers the server never computed.
+const UNVERIFIABLE = /\b(per ?cent|percent(?:age)?s?|pct|hundreds?|thousands?|millions?|billions?|half|twice|doubl\w*|tripl\w*|times|fold)\b|\d\s?(?:k|m|mm|bn|b)\b|%/i;
+const WORD_AMOUNT = /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|dozen)\b[\w\s-]{0,20}\b(?:dollars?|bucks|usd)\b/i;
 
 /** True when every number in `text` is one the server computed (dollar figures within $1). */
 export function numbersMatch(text: string, s: FlowStats): boolean {
   const { cents, plain } = allowedFigures(s);
   const body = withoutMerchants(text, s);
+  if (UNVERIFIABLE.test(body) || WORD_AMOUNT.test(body)) return false;
   for (const m of body.matchAll(/(\$)?\s?(\d[\d,]*(?:\.\d+)?)(\s?%)?(\s?(?:dollars?|usd|bucks))?/gi)) {
     if (m[3]) return false;
     const value = Number(m[2].replace(/,/g, ""));
@@ -244,7 +255,7 @@ export function numbersMatch(text: string, s: FlowStats): boolean {
 
 type Verdict = "ok" | "advice" | "number";
 function verdict(text: string, s: FlowStats, codes: Set<string>): Verdict {
-  if (findAdvice(withoutMerchants(text, s)).length) { codes.add("advice_language"); return "advice"; }
+  if (findAdvice(text).length) { codes.add("advice_language"); return "advice"; }
   if (!numbersMatch(text, s)) { codes.add("invented_number"); return "number"; }
   return "ok";
 }

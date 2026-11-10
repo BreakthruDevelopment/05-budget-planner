@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { and, asc, count, eq, inArray, lt, or, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AI_DISCLAIMER } from "@/lib/advice-guardrails";
 import { generate } from "@/lib/ai";
@@ -11,6 +11,7 @@ import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
 import { BadRequestError, TooManyRequestsError } from "@/lib/errors";
 import { ownedBy } from "@/lib/owned";
+import { AiError } from "@/lib/ai/types";
 import { advisoryLock, consumeRate, releaseDaily, releaseRate, reserveDaily } from "@/lib/usage";
 
 const { txn, categoryRule, cashflowSummary } = schema;
@@ -32,6 +33,8 @@ async function reserve(actor: Actor, kind: "categorize" | "explain", perHour: nu
     if (!(await reserveDaily(tx, "ai", env().AI_DAILY_CAP))) throw new TooManyRequestsError(dailyMessage);
   });
 }
+/** A failure before any provider request was made (the gateway refused the input): the reservation paid for nothing. */
+const neverSent = (err: unknown) => err instanceof AiError && err.kind === "input_rejected";
 /** The work the reservation paid for never happened. */
 async function refund(actor: Actor, kind: "categorize" | "explain") {
   await db().transaction(async (tx) => {
@@ -44,7 +47,15 @@ async function refund(actor: Actor, kind: "categorize" | "explain") {
 // Categorization
 // ---------------------------------------------------------------------------
 
-const eligible = or(eq(txn.categorySource, "none"), and(eq(txn.categorySource, "ai"), lt(txn.aiConfidence, "0.60")));
+/**
+ * Never-categorized rows, plus low-confidence AI rows only when the row changed after its last suggestion
+ * (`updated_at` moves on every import change and edit). A row the model already gave up on isn't re-sent on every click.
+ * Rule changes need no clause: creating a rule rewrites the merchant's `none`/`ai` rows to `rule`.
+ */
+const eligible = or(
+  eq(txn.categorySource, "none"),
+  and(eq(txn.categorySource, "ai"), lt(txn.aiConfidence, "0.60"), or(isNull(txn.aiSuggestedAt), sql`${txn.updatedAt} > ${txn.aiSuggestedAt}`)),
+);
 
 /** Own uncategorized and low-confidence AI rows. Never `user`, `rule` or `provider` rows. */
 export async function countCategorizable(actor: Actor): Promise<number> {
@@ -74,16 +85,17 @@ export async function categorizeTransactions(actor: Actor, gen: Gen = generate):
       rows.map((r) => ({ id: r.id, name: r.name, merchantName: r.merchantName, amountCents: r.amountCents, providerCategory: r.providerCategory })),
       rules, gen);
   } catch (err) {
-    await refund(actor, "categorize");
+    if (neverSent(err)) await refund(actor, "categorize");
     throw err;
   }
   let applied = 0; let suggested = 0;
+  const now = new Date(); // updated_at == ai_suggested_at, so only a later change makes the row eligible again
   await db().transaction(async (tx) => {
     // Same lock as recategorize: a user's edit and this write never interleave.
     await advisoryLock(tx, `categories:${actor.id}`);
     for (const p of result.proposals) {
-      const updated = await tx.update(txn).set({ categorySlug: p.category, categorySource: "ai", aiConfidence: p.confidence.toFixed(2), updatedAt: new Date() })
-        .where(ownedBy(txn, actor, eq(txn.id, p.id), inArray(txn.categorySource, ["none", "ai"]))).returning({ id: txn.id });
+      const updated = await tx.update(txn).set({ categorySlug: p.category, categorySource: "ai", aiConfidence: p.confidence.toFixed(2), aiSuggestedAt: now, updatedAt: now })
+        .where(ownedBy(txn, actor, eq(txn.id, p.id), eligible)).returning({ id: txn.id });
       if (!updated.length) continue; // the user or a rule got there first
       if (p.confidence >= MIN_CONFIDENCE) applied++; else suggested++;
     }
@@ -140,27 +152,38 @@ export async function explainCashflow(actor: Actor, input: unknown, gen: Gen = g
   const inputHash = hashStats(stats);
 
   // Decide and reserve in one short transaction; the model call happens after it commits.
-  const cached = await db().transaction(async (tx) => {
+  // Without `regenerate`, an existing summary is returned as is (flagged stale when the numbers moved): refreshing is a
+  // deliberate, counted action, so changing data can't be used to dodge the regeneration limit.
+  const decision = await db().transaction(async (tx) => {
     await advisoryLock(tx, `explain:${actor.id}:${month}`);
     const [row] = await tx.select().from(cashflowSummary).where(ownedBy(cashflowSummary, actor, eq(cashflowSummary.month, month)));
-    if (row && row.inputHash === inputHash && !regenerate) return toView(row, false);
+    if (row && !regenerate) return { view: toView(row, row.inputHash !== inputHash), used: row.regenerations, bumped: false };
+    const bumped = Boolean(row);
     if (row && row.regenerations >= MAX_REGENERATIONS) {
       throw new TooManyRequestsError(`This month's summary can be regenerated ${MAX_REGENERATIONS} times. The limit has been reached.`);
     }
     await consumeRate(tx, actor.id, "explain", EXPLAIN_PER_HOUR, `AI limit reached (${EXPLAIN_PER_HOUR} per hour). Try again later.`);
     if (!(await reserveDaily(tx, "ai", env().AI_DAILY_CAP))) throw new TooManyRequestsError(dailyMessage);
     if (row) await tx.update(cashflowSummary).set({ regenerations: row.regenerations + 1 }).where(ownedBy(cashflowSummary, actor, eq(cashflowSummary.month, month)));
-    return null;
+    return { view: null, used: row ? row.regenerations + 1 : 0, bumped };
   });
-  if (cached) return cached;
+  if (decision.view) return decision.view;
 
   let out: Awaited<ReturnType<typeof explainStats>>;
   try {
     out = await explainStats(stats, gen);
   } catch (err) {
-    await refund(actor, "explain");
-    await db().update(cashflowSummary).set({ regenerations: sql`greatest(${cashflowSummary.regenerations} - 1, 0)` }).where(ownedBy(cashflowSummary, actor, eq(cashflowSummary.month, month)));
+    // Only when no provider request was made. A timeout or unusable output still cost the provider a call.
+    if (neverSent(err)) {
+      await refund(actor, "explain");
+      if (decision.bumped) await db().update(cashflowSummary).set({ regenerations: sql`greatest(${cashflowSummary.regenerations} - 1, 0)` }).where(ownedBy(cashflowSummary, actor, eq(cashflowSummary.month, month)));
+    }
     throw err;
+  }
+  // The live provider failed and recorded text stepped in: show it, but never store it under the live hash,
+  // or it would be served as "current" once the provider is back.
+  if (out.demo && env().AI_PROVIDER !== "demo") {
+    return { month, data: out.data, mode: "demo", demo: true, generatedAt: new Date().toISOString(), stale: false, regenerationsLeft: Math.max(0, MAX_REGENERATIONS - decision.used), disclaimer: AI_DISCLAIMER };
   }
   const [saved] = await db().insert(cashflowSummary).values({ ownerId: actor.id, month, data: out.data, stats, mode: out.mode, inputHash, regenerations: 0 })
     .onConflictDoUpdate({ target: [cashflowSummary.ownerId, cashflowSummary.month], set: { data: out.data, stats, mode: out.mode, inputHash, generatedAt: new Date() } }).returning();

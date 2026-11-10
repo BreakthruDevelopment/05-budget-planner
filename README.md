@@ -120,6 +120,14 @@ advisory lock so instances starting together can't race. `pnpm db:migrate` does 
 
 With `AI_FALLBACK_TO_DEMO=true`, a quota error or outage serves the recorded answer and the UI says so.
 
+### Budget AI guardrails
+
+Two tasks go through `generate()`: `categorize-transactions` and `explain-cash-flow` (`src/lib/ai/budget-tasks.ts`, `src/lib/budget-ai.ts`). Merchant names are treated as data, outflows can never become income, and the explanation is labelled "AI summary, not financial advice".
+
+- **The number check proves a figure exists in the data, not which category it belongs to.** Every dollar amount the model writes must match a figure the server computed (within $1), and percentages, ratios and spelled-out amounts are rejected. A model that attaches a real figure to the wrong category passes this check. The over-budget list is the only claim the server verifies against the data.
+- The advice filter (`src/lib/advice-guardrails.ts`) is a broad keyword list. It reduces advice; it does not prove its absence.
+- A summary is regenerated only when the user asks (`regenerate: true`, at most 2 per month); changed data just marks the cached text stale.
+
 ### Images: `generate({ images })`
 
 `generate()` takes an optional `images: { mimeType, data }[]` (base64 of the raw bytes, no `data:` prefix). Limits
