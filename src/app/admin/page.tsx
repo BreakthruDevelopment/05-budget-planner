@@ -43,15 +43,25 @@ export default async function AdminPage() {
 
   return (
     <>
-      <PageIntro section="Admin" title="Users" description="Everyone who has signed up, newest first." />
-      <Panel title="Demo workspace"><DemoButton /></Panel>
-      <StatGrid>
-        <StatTile value={counts.users} label="Users" tone="accent" />
-        <StatTile value={counts.items.demo + counts.items.plaid} label="Linked items" />
-        <StatTile value={counts.transactions} label="Transactions" />
-        <StatTile value={`${counts.aiCalls} / ${counts.aiDailyCap}`} label="AI calls today / cap" />
-        <StatTile value={users.filter((u) => u.role === "admin").length} label="Admins" />
-      </StatGrid>
+      <PageIntro
+        section="Admin"
+        title="Users"
+        description="Counts and caps only. Account and transaction details stay with each person."
+      />
+      <Panel title="Demo workspace">
+        <DemoButton />
+      </Panel>
+      <div data-users={counts.users} data-demo-items={counts.items.demo} data-plaid-items={counts.items.plaid} data-transactions={counts.transactions} data-ai-calls={counts.aiCalls} data-ai-cap={counts.aiDailyCap}>
+        <StatGrid>
+          <StatTile value={counts.users} label="Users" tone="accent" />
+          <StatTile value={counts.items.demo} label="Demo banks" />
+          <StatTile value={counts.items.plaid} label="Plaid banks" />
+          <StatTile value={counts.transactions} label="Transactions" />
+          <StatTile value={counts.aiCalls} label="AI calls today" />
+          <StatTile value={counts.aiDailyCap} label="Daily AI cap" />
+          <StatTile value={users.filter((u) => u.role === "admin").length} label="Admins" />
+        </StatGrid>
+      </div>
       <Panel title="All users" count={users.length}>
         <DataList caption="Users" rows={users} rowKey={(u) => u.id} columns={columns} empty="No users yet." />
       </Panel>
