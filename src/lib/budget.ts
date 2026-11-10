@@ -81,13 +81,13 @@ export type CashFlow = { month: string; incomeCents: number; spendCents: number;
 export async function cashFlow(actor: Actor, month: string): Promise<CashFlow> {
   permission(actor, "read"); const { start, end, previous } = monthBounds(month);
   const [row] = await db().execute<{ data: CashFlow }>(sql`
-    with rows as (select * from txn where owner_id = ${actor.id} and date >= ${previous}::date and date < ${end}::date),
-    posted as (select * from rows where iso_currency = 'USD' and not pending and coalesce(category_slug, 'other') <> 'transfer'),
+    with rows as (select *, case when category_source = 'ai' and ai_confidence < 0.6 then 'other' else coalesce(category_slug, 'other') end as eff_slug from txn where owner_id = ${actor.id} and date >= ${previous}::date and date < ${end}::date),
+    posted as (select * from rows where iso_currency = 'USD' and not pending and eff_slug <> 'transfer'),
     current_rows as (select * from posted where date >= ${start}::date),
     totals as (select coalesce(sum(amount_cents) filter (where amount_cents > 0),0) as income, -coalesce(sum(amount_cents) filter (where amount_cents < 0),0) as spend from current_rows),
     cats as (select c.slug, coalesce(-sum(p.amount_cents) filter (where p.date >= ${start}::date),0) as spend,
       coalesce(-sum(p.amount_cents) filter (where p.date < ${start}::date),0) as previous, coalesce(b.monthly_limit_cents,0) as budget
-      from category c left join posted p on coalesce(p.category_slug,'other')=c.slug and p.amount_cents < 0
+      from category c left join posted p on p.eff_slug=c.slug and p.amount_cents < 0
       left join budget b on b.category_slug=c.slug and b.owner_id=${actor.id} where c.kind<>'transfer' group by c.slug,c.position,b.monthly_limit_cents order by c.position),
     merchants as (select coalesce(merchant_name,name) as name, -sum(amount_cents) as spend from current_rows where amount_cents < 0 group by coalesce(merchant_name,name) order by spend desc, name limit 5)
     select jsonb_build_object('month',${month}::text,'incomeCents',income,'spendCents',spend,'netCents',income-spend,

@@ -1,0 +1,1 @@
+ALTER TABLE "txn" ADD COLUMN "ai_suggested_at" timestamp (3) with time zone;

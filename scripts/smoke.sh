@@ -77,6 +77,23 @@ limits=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/budgets")
 flow=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/cashflow")
 echo "$flow" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const f=JSON.parse(s);if(!/^\d{4}-\d{2}$/.test(f.month)||![f.incomeCents,f.spendCents,f.netCents,f.counts.transactions].every(Number.isSafeInteger)||!Array.isArray(f.categories)||!Array.isArray(f.topMerchants)||f.netCents!==f.incomeCents-f.spendCents)process.exit(1)})' || fail "cashflow shape"
 pass "recategorize always, budgets and cashflow"
+ai=$(curl -fsS -X POST -b "$JAR_A" -H "origin: $BASE_URL" "$BASE_URL/api/ai/categorize") || fail "ai categorize"
+echo "$ai" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s);if(!Number.isInteger(r.sent)||!Number.isInteger(r.applied)||typeof r.demo!=="boolean"||!/not financial advice/.test(r.disclaimer))process.exit(1)})' || fail "ai categorize shape"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -b "$JAR_A" -H 'origin: https://sibling.breakthruventures.ai' "$BASE_URL/api/ai/categorize")
+[ "$code" = 403 ] || fail "cross-origin ai categorize: $code"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/api/ai/categorize")
+[ "$code" = 401 ] || fail "anonymous ai categorize: $code"
+explain_month=$(node -e 'console.log(new Date().toISOString().slice(0,7))')
+explain_body="{\"month\":\"$explain_month\"}"
+first=$(curl -fsS -X POST -b "$JAR_A" -H "origin: $BASE_URL" -H 'content-type: application/json' -d "$explain_body" "$BASE_URL/api/ai/cashflow") || fail "ai cashflow"
+second=$(curl -fsS -X POST -b "$JAR_A" -H "origin: $BASE_URL" -H 'content-type: application/json' -d "$explain_body" "$BASE_URL/api/ai/cashflow") || fail "ai cashflow again"
+[ "$(echo "$first" | field explanation.generatedAt)" = "$(echo "$second" | field explanation.generatedAt)" ] || fail "unchanged data regenerated the summary"
+[ "$(echo "$first" | field explanation.disclaimer)" = "AI summary, not financial advice" ] || fail "ai disclaimer"
+cached=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/ai/cashflow?month=$explain_month")
+[ "$(echo "$cached" | field explanation.generatedAt)" = "$(echo "$first" | field explanation.generatedAt)" ] || fail "cached summary missing"
+cached_b=$(curl -fsS -b "$JAR_B" "$BASE_URL/api/ai/cashflow?month=$explain_month")
+[ "$(echo "$cached_b" | field explanation)" = null ] || fail "B can see A's summary"
+pass "AI categorize and cash-flow summary (cached on unchanged data, private per user)"
 for path in /overview /transactions /budgets /accounts; do
   curl -fsS -b "$JAR_A" "$BASE_URL$path" > /dev/null || fail "signed-in page $path"
 done

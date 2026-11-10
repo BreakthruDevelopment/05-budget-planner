@@ -10,6 +10,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval:budget": "AI_PROVIDER=gemini vitest run test/ai-evals.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.mts",
     "seed:demo": "NODE_OPTIONS=--conditions=react-server tsx scripts/seed-demo.mts",

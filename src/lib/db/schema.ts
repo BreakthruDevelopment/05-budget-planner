@@ -143,7 +143,7 @@ export const txn = pgTable("txn", {
   name: varchar("name", { length: 200 }).notNull(), merchantName: varchar("merchant_name", { length: 120 }), merchantKey: varchar("merchant_key", { length: 120 }).notNull(),
   amountCents: bigint("amount_cents", { mode: "number" }).notNull(), isoCurrency: text("iso_currency").notNull(), pending: boolean("pending").notNull(),
   providerCategory: varchar("provider_category", { length: 64 }), categorySlug: text("category_slug").references(() => category.slug),
-  categorySource: text("category_source", { enum: ["user", "rule", "provider", "ai", "none"] }).notNull().default("none"), aiConfidence: numeric("ai_confidence", { precision: 3, scale: 2 }),
+  categorySource: text("category_source", { enum: ["user", "rule", "provider", "ai", "none"] }).notNull().default("none"), aiConfidence: numeric("ai_confidence", { precision: 3, scale: 2 }), aiSuggestedAt: instant("ai_suggested_at"),
   createdAt: instant("created_at").notNull().defaultNow(), updatedAt: instant("updated_at").notNull().defaultNow(),
 }, t => [unique("txn_provider_unique").on(t.itemId, t.providerTxnId), foreignKey({ columns: [t.accountId, t.itemId, t.ownerId], foreignColumns: [bankAccount.id, bankAccount.itemId, bankAccount.ownerId] }).onDelete("cascade"),
   index("txn_owner_date_idx").on(t.ownerId, t.date.desc(), t.id.desc()), index("txn_owner_category_date_idx").on(t.ownerId, t.categorySlug, t.date),
