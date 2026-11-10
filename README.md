@@ -61,7 +61,7 @@ while the app is running.
 
 Every app shares the Breakthru look (guide and concept: `ai-dev-os/design/`). Tokens live in `src/app/globals.css`
 (light and dark; use `bg-surface`, `text-muted`, `border-border`, `bg-accent` and the status tokens, never raw colors).
-Fonts load through `next/font/google` in `src/app/layout.tsx`: Newsreader (`font-display`), Public Sans (`font-sans`),
+Fonts are self-hosted with `next/font/local` in `src/app/layout.tsx` (files and licenses in `src/app/fonts/`, so builds need no network): Newsreader (`font-display`), Public Sans (`font-sans`),
 IBM Plex Mono (`font-mono`). Set the app's name once in `src/lib/app-config.ts` (`APP_TITLE`, or the `APP_NAME` variable).
 
 | Component | Location | Use |
