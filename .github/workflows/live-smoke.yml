@@ -1,0 +1,21 @@
+name: Live smoke test
+on:
+  push:
+    branches: ["claude/live-smoke*"]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Health
+        run: |
+          url="$(head -n1 .github/live-smoke-url | tr -d '[:space:]')"
+          echo "url=$url" >> "$GITHUB_ENV"
+          for i in $(seq 1 12); do curl -sS -m 60 "$url/api/health" && break; sleep 10; done; echo
+      - name: Smoke
+        run: BASE_URL="$url" bash scripts/smoke.sh
