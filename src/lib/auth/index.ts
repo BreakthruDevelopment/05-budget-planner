@@ -1,11 +1,10 @@
 import "server-only";
-import { APIError } from "better-auth/api";
-import { isDemoEmail, MARKER } from "@/lib/demo-identity";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
 import { admin } from "better-auth/plugins";
 import { db, schema } from "@/lib/db";
+import { refuseDemoIdentity } from "@/lib/demo-identity";
 import { env } from "@/lib/env";
 import { ac, DISABLED_AUTH_PATHS, roles } from "./permissions";
 
@@ -25,14 +24,12 @@ function createAuth() {
         verification: schema.verification,
       },
     }),
+    // Nobody can sign up as, or turn an account into, a demo identity (see demo-identity.ts). The demo loader
+    // writes rows directly with Drizzle and never goes through these hooks.
     databaseHooks: {
       user: {
-        create: { before: async (user) => {
-          if (isDemoEmail(user.email) || user.image === MARKER) throw new APIError("BAD_REQUEST", { message: "Reserved demo identity" });
-        } },
-        update: { before: async (user) => {
-          if ((user.email && isDemoEmail(user.email)) || user.image === MARKER) throw new APIError("BAD_REQUEST", { message: "Reserved demo identity" });
-        } },
+        create: { before: async (data) => refuseDemoIdentity(data) },
+        update: { before: async (data) => refuseDemoIdentity(data) },
       },
     },
     emailAndPassword: {
