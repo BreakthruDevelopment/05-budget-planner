@@ -29,6 +29,13 @@
       "when": 1794293552867,
       "tag": "0003_ai-suggested-at",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794420860911,
+      "tag": "0004_plaid-rate-kinds",
+      "breakpoints": true
     }
   ]
 }

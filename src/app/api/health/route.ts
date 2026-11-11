@@ -1,3 +1,4 @@
+import { bankMode } from "@/lib/bank/provider";
 import { pingDb } from "@/lib/db";
 import { migrationState } from "@/lib/db/migrate-on-start";
 
@@ -16,7 +17,7 @@ export async function GET() {
   const body = {
     status: ok ? "ok" : "degraded",
     app: process.env.APP_NAME ?? "30-apps-template",
-    bank: "demo",
+    bank: bankMode(),
     version: process.env.APP_VERSION ?? "dev",
     cloud: process.env.CLOUD ?? "local",
     checks: {

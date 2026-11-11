@@ -73,7 +73,7 @@ export const verification = pgTable("verification", {
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
-export const RATE_KINDS = ["api_write", "ai", "upload", "sync", "categorize", "explain", "rule_write", "demo_load"] as const;
+export const RATE_KINDS = ["api_write", "ai", "upload", "sync", "categorize", "explain", "rule_write", "demo_load", "link_token", "exchange"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load", "categorize", "explain"] as const;
 
 const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
