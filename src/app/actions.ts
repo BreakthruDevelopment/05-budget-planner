@@ -3,7 +3,7 @@ import { headers } from "next/headers";
 import { requireUser, requireRole } from "@/lib/auth/session";
 import { requireSameOrigin } from "@/lib/csrf";
 import { errorInfo, readJson } from "@/lib/http";
-import { connectDemo, disconnectItem, syncItem } from "@/lib/bank/items";
+import { connectBank, connectDemo, createLinkToken, disconnectItem, syncItem } from "@/lib/bank/items";
 import { categorizeTransactions, explainCashflow } from "@/lib/budget-ai";
 import { recategorizeTransaction, replaceBudgets } from "@/lib/budget";
 import { loadDemoWorkspace } from "@/lib/demo-workspace";
@@ -22,6 +22,8 @@ async function capped(input: unknown) {
   return readJson(new Request("http://localhost", { method: "POST", body: JSON.stringify(input) }), 16384);
 }
 export async function connectDemoAction(input: unknown) { return mutation(async actor => connectDemo(actor, await capped(input))); }
+export async function connectBankAction(input: unknown) { return mutation(async actor => connectBank(actor, await capped(input))); }
+export async function createLinkTokenAction() { return mutation(actor => createLinkToken(actor)); }
 export async function syncItemAction(id: string) { return mutation(actor => syncItem(actor, id)); }
 export async function disconnectItemAction(id: string) { return mutation(actor => disconnectItem(actor, id)); }
 export async function recategorizeAction(id: string, input: unknown) { return mutation(async actor => recategorizeTransaction(actor, id, await capped(input))); }

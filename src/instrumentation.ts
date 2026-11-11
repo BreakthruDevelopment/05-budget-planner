@@ -5,6 +5,8 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  // Resolve the bank provider once at startup so a fallback to the demo bank is logged (names only, never values).
+  (await import("./lib/bank/provider")).bankMode();
   if (process.env.MIGRATE_ON_START !== "true") return;
   const { migrateOnStart } = await import("./lib/db/migrate-on-start");
   await migrateOnStart();
