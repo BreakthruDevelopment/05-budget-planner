@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bankMode, providerFor, requirePlaid, resetProviderLog } from "./provider";
 
-const NAMES = ["PLAID_CLIENT_ID", "PLAID_SECRET", "TOKEN_ENC_KEY", "BANK_PROVIDER"] as const;
+const NAMES = ["PLAID_CLIENT_ID", "PLAID_SECRET", "TOKEN_ENC_KEY", "TOKEN_ENC_KEY_PREVIOUS", "BANK_PROVIDER"] as const;
 const saved = Object.fromEntries(NAMES.map(n => [n, process.env[n]]));
 const key = () => randomBytes(32).toString("base64");
 let lines: string[];
@@ -60,6 +60,17 @@ describe("bank provider selection", () => {
       expect(out).toContain('"invalid":["TOKEN_ENC_KEY"]');
       expect(out).not.toContain(bad);
     }
+  });
+
+  it("names the variable actually at fault, so a bad previous key is not blamed on the current one", () => {
+    process.env.PLAID_CLIENT_ID = "cid"; process.env.PLAID_SECRET = "sec"; process.env.TOKEN_ENC_KEY = key();
+    process.env.TOKEN_ENC_KEY_PREVIOUS = randomBytes(31).toString("base64");
+    expect(bankMode()).toBe("demo");
+    expect(lines.join("\n")).toContain('"invalid":["TOKEN_ENC_KEY_PREVIOUS"]');
+    resetProviderLog(); lines.length = 0;
+    process.env.TOKEN_ENC_KEY_PREVIOUS = process.env.TOKEN_ENC_KEY; // identical keys: also the previous one's fault
+    expect(bankMode()).toBe("demo");
+    expect(lines.join("\n")).toContain('"invalid":["TOKEN_ENC_KEY_PREVIOUS"]');
   });
 
   it("BANK_PROVIDER=demo forces the demo bank even with every key present", () => {

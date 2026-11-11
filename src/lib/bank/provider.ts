@@ -22,7 +22,11 @@ function resolve(): { mode: "plaid"; clientId: string; secret: string } | { mode
   const missing = [!clientId && "PLAID_CLIENT_ID", !secret && "PLAID_SECRET", !rawKey && "TOKEN_ENC_KEY"].filter((v): v is string => !!v);
   const invalid: string[] = [];
   if (rawKey) {
-    try { validateEncryptionEnv(); } catch { invalid.push("TOKEN_ENC_KEY"); }
+    try { validateEncryptionEnv(); } catch (err) {
+      // The error names the variable at fault (current or previous key); log that name, never a value.
+      const named = err instanceof Error ? /^(TOKEN_ENC_KEY(?:_PREVIOUS)?)\b/.exec(err.message)?.[1] : undefined;
+      invalid.push(named ?? "TOKEN_ENC_KEY");
+    }
   }
   if (missing.length || invalid.length) {
     return { mode: "demo", reason: missing.length === 3 ? "unconfigured" : "partial", missing, invalid };

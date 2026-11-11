@@ -138,7 +138,6 @@ describe.skipIf(!url)("Plaid bank sync (Postgres, stubbed Plaid)", () => {
     const callsB = b.calls.length, callsC = c.calls.length;
     await expect(bank.syncItem(alice, itemB.id, providerOf(b))).rejects.toMatchObject({ name: "EnvelopeError", message: "Decryption failed" });
     await expect(bank.syncItem(bob, itemC.id, providerOf(c))).rejects.toMatchObject({ name: "EnvelopeError" });
-    await expect(bank.disconnectItem(alice, itemB.id, providerOf(b))).rejects.toMatchObject({ name: "EnvelopeError" });
     expect(b.calls.length).toBe(callsB);
     expect(c.calls.length).toBe(callsC);
     // The original row still works, and a failed decrypt released the sync lease.
@@ -146,6 +145,30 @@ describe.skipIf(!url)("Plaid bank sync (Postgres, stubbed Plaid)", () => {
     const [lease] = await sql`select syncing_since from bank_item where id=${itemB.id}`;
     expect(lease.syncing_since).toBeNull();
     expect(http.errorInfo(await bank.syncItem(alice, itemB.id, providerOf(b)).catch((e: unknown) => e)).status).toBe(500);
+  });
+
+  it("when the token can't be decrypted (key lost) the owner can still delete locally, with a log line and no Plaid call", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((l) => void logs.push(String(l)));
+    vi.spyOn(console, "error").mockImplementation((l) => void logs.push(String(l)));
+    const stub = plaidStub();
+    const { item } = await connect(stub);
+    const calls = stub.calls.length, key = process.env.TOKEN_ENC_KEY;
+    process.env.TOKEN_ENC_KEY = randomBytes(32).toString("base64"); // the old key is gone
+    try {
+      await bank.disconnectItem(alice, item.id, providerOf(stub));
+    } finally { process.env.TOKEN_ENC_KEY = key; }
+    expect(stub.calls.length).toBe(calls);
+    expect(await sql`select 1 from bank_item where id=${item.id}`).toHaveLength(0);
+    expect(await sql`select 1 from bank_item_secret where item_id=${item.id}`).toHaveLength(0);
+    const out = logs.join("\n");
+    expect(out).toContain("bank.item.disconnect_without_revoke");
+    expect(out).toContain("token_undecryptable");
+    expect(out).not.toContain(stub.accessToken);
+    // Still owner-only: nobody else can use this escape hatch.
+    const other = plaidStub();
+    const { item: mine } = await connect(other);
+    for (const actor of [bob, admin]) await expect(bank.disconnectItem(actor, mine.id, providerOf(other))).rejects.toMatchObject({ status: 404 });
   });
 
   it("sync is idempotent: a second sync and a full replay from a null cursor leave identical rows", async () => {
@@ -234,17 +257,23 @@ describe.skipIf(!url)("Plaid bank sync (Postgres, stubbed Plaid)", () => {
     }
   });
 
-  it("a Plaid item cannot be synced or disconnected while Plaid is disabled (it stays, and nothing is lost)", async () => {
+  it("while Plaid is disabled an item can't sync (409), but the owner can still delete it locally, logged", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((l) => void logs.push(String(l)));
+    vi.spyOn(console, "error").mockImplementation((l) => void logs.push(String(l)));
     const stub = plaidStub();
     const { item } = await connect(stub);
-    const key = process.env.TOKEN_ENC_KEY;
-    delete process.env.PLAID_SECRET; vi.spyOn(console, "log").mockImplementation(() => {});
+    const calls = stub.calls.length, key = process.env.TOKEN_ENC_KEY;
+    delete process.env.PLAID_SECRET;
     try {
       await clearRate();
       await expect(bank.syncItem(alice, item.id)).rejects.toMatchObject({ status: 409 });
-      await expect(bank.disconnectItem(alice, item.id)).rejects.toMatchObject({ status: 409 });
-      expect(await sql`select 1 from bank_item_secret where item_id=${item.id}`).toHaveLength(1);
+      await expect(bank.disconnectItem(bob, item.id)).rejects.toMatchObject({ status: 404 });
+      await bank.disconnectItem(alice, item.id);
     } finally { process.env.PLAID_SECRET = creds.secret; process.env.TOKEN_ENC_KEY = key; }
+    expect(stub.calls.length).toBe(calls);
+    expect(await sql`select 1 from bank_item_secret where item_id=${item.id}`).toHaveLength(0);
+    expect(logs.join("\n")).toContain("provider_disabled");
   });
 
   it("rejects anything but a sandbox public token before any Plaid call", async () => {
@@ -298,5 +327,155 @@ describe.skipIf(!url)("Plaid bank sync (Postgres, stubbed Plaid)", () => {
     } finally { process.env.TOKEN_ENC_KEY = key; }
     expect(stub.removed).toBe(true);
     expect(await bank.listBankItems(alice)).toEqual([]);
+  });
+
+  it("connect keeps the item and returns the sync error when the first sync fails, so the one-time public token isn't wasted", async () => {
+    // Sync limit already used up: the first sync is refused with 429.
+    await sql`insert into rate_event (user_id, kind) select ${alice.id}, 'sync' from generate_series(1,6)`;
+    const stub = plaidStub();
+    stub.add(txn("t1"));
+    const res = await connect(stub);
+    expect(res.item).toMatchObject({ provider: "plaid", status: "active" });
+    expect(res.sync).toMatchObject({ more: true, added: 0, error: "Refresh limit reached. Try again later.", status: 429 });
+    expect(stub.calls.filter(c => c.path === "/item/public_token/exchange")).toHaveLength(1);
+    expect(stub.removed).toBe(false);
+    expect(await sql`select 1 from bank_item_secret where item_id=${res.item.id}`).toHaveLength(1);
+    // The UI continues with a normal refresh.
+    await clearRate();
+    await expect(bank.syncItem(alice, res.item.id, providerOf(stub))).resolves.toMatchObject({ added: 1, more: false });
+
+    // A Plaid failure during the first sync behaves the same way, without leaking upstream text.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const flaky = plaidStub();
+    flaky.failures.push({ path: "/transactions/sync", code: "INTERNAL_SERVER_ERROR", status: 500, echo: "upstream words" });
+    const second = await connect(flaky);
+    expect(second.sync).toMatchObject({ more: true, status: 502 });
+    expect(JSON.stringify(second)).not.toContain("upstream words");
+    expect(JSON.stringify(second)).not.toContain(flaky.accessToken);
+  });
+
+  it("stores the encrypted token before the institution lookup, and a failed lookup keeps the default name", async () => {
+    const stub = plaidStub();
+    let storedAtLookup = -1;
+    const real = stub.fetch;
+    const watching = async (input: string, init: RequestInit) => {
+      if (input.endsWith("/item/get")) {
+        storedAtLookup = (await sql`select 1 from bank_item_secret where owner_id=${alice.id}`).length;
+        stub.failures.push({ path: "/item/get", code: "INTERNAL_SERVER_ERROR", status: 500 });
+      }
+      return real(input, init);
+    };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await bank.connectPlaid(alice, { publicToken: PUBLIC_TOKEN }, plaidMod.createPlaidProvider(creds, { fetch: watching }));
+    expect(storedAtLookup).toBe(1);
+    expect(res.item.institutionName).toBe("Plaid Sandbox");
+    expect(res.sync).not.toHaveProperty("error");
+  });
+
+  it("limits the first sync to the time left in the request: with almost none left it skips the sync and says more: true", async () => {
+    const stub = plaidStub();
+    stub.add(txn("t1"));
+    const real = stub.fetch;
+    let offset = 0;
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const slow = async (input: string, init: RequestInit) => { const r = await real(input, init); if (input.endsWith("/item/public_token/exchange")) offset = 23_500; return r; };
+    try {
+      const res = await bank.connectPlaid(alice, { publicToken: PUBLIC_TOKEN }, plaidMod.createPlaidProvider(creds, { fetch: slow }));
+      expect(res.sync).toEqual({ added: 0, modified: 0, removed: 0, more: true });
+      expect(stub.syncCursors()).toEqual([]);
+      expect(res.item.id).toBeTruthy();
+    } finally { offset = 0; }
+    vi.restoreAllMocks();
+    await clearRate();
+    const [{ id }] = await sql`select id from bank_item where owner_id=${alice.id}`;
+    await expect(bank.syncItem(alice, id, providerOf(stub))).resolves.toMatchObject({ added: 1, more: false });
+  });
+
+  it("puts the stored cursor back to the loop's starting cursor on a mutation error, including when the restart budget runs out", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const stub = plaidStub();
+    stub.add(txn("t1"), txn("t2"), txn("t3"), txn("t4"), txn("t5"), txn("t6"));
+    const { item } = await connect(stub);
+    expect((await bank.getItem(alice, item.id)).cursor).toBe("c6");
+    stub.add(txn("t7"), txn("t8"), txn("t9"), txn("t10"));
+    const real = stub.fetch; let syncs = 0; const storedDuringRestarts: (string | null)[] = [];
+    const flaky = async (input: string, init: RequestInit) => {
+      if (input.endsWith("/transactions/sync")) {
+        syncs++;
+        if (syncs === 2) for (let i = 0; i < 3; i++) stub.failures.push({ path: "/transactions/sync", code: "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION", type: "TRANSACTIONS_ERROR" });
+        if (syncs >= 3) storedDuringRestarts.push((await sql`select cursor from bank_item where id=${item.id}`)[0].cursor);
+      }
+      return real(input, init);
+    };
+    await clearRate();
+    // page 1 applies (stored cursor moves to c8), then three mutation errors exhaust the 2 restarts.
+    await expect(bank.syncItem(alice, item.id, plaidMod.createPlaidProvider(creds, { fetch: flaky }))).rejects.toMatchObject({ code: "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION" });
+    expect(storedDuringRestarts).toEqual(["c6", "c6"]); // reset before each restart, not left mid-loop at c8
+    expect((await bank.getItem(alice, item.id)).cursor).toBe("c6");
+    expect((await bank.getItem(alice, item.id)).syncingSince).toBeNull();
+    // The next sync starts from the loop-start cursor and finishes.
+    const before = stub.syncCursors().length;
+    await clearRate();
+    await expect(bank.syncItem(alice, item.id, providerOf(stub))).resolves.toMatchObject({ added: 4, more: false });
+    expect(stub.syncCursors().slice(before)[0]).toBe("c6");
+    expect(await txns(item.id)).toHaveLength(10);
+  });
+
+  it("disconnect calls Plaid with no transaction open and no second pool connection held, and takes a lease against concurrent work", async () => {
+    const stub = plaidStub();
+    const { item } = await connect(stub);
+    let release!: () => void; const gate = new Promise<void>(r => { release = r; });
+    let entered!: () => void; const inRemove = new Promise<void>(r => { entered = r; });
+    const gated = { ...providerOf(stub), remove: async (t: string | null) => { entered(); await gate; return providerOf(stub).remove(t); } };
+    await clearRate();
+    const done = bank.disconnectItem(alice, item.id, gated);
+    await inRemove;
+    const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid() and (state like 'idle in transaction%' or xact_start is not null)`;
+    expect(n).toBe(0); // nothing is mid-transaction while Plaid is being called
+    await expect(bank.syncItem(alice, item.id, providerOf(stub))).rejects.toMatchObject({ status: 409 });
+    await expect(bank.disconnectItem(alice, item.id, providerOf(stub))).rejects.toMatchObject({ status: 409 });
+    release(); await done;
+    expect(stub.removed).toBe(true);
+    expect(await sql`select 1 from bank_item where id=${item.id}`).toHaveLength(0);
+    expect(await sql`select 1 from bank_item_secret where item_id=${item.id}`).toHaveLength(0);
+  });
+
+  it("a failed Plaid removal releases the lease and keeps the item and token, so disconnect can be retried", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const stub = plaidStub();
+    const { item } = await connect(stub);
+    stub.failures.push({ path: "/item/remove", code: "INTERNAL_SERVER_ERROR", status: 500 });
+    await expect(bank.disconnectItem(alice, item.id, providerOf(stub))).rejects.toMatchObject({ status: 502 });
+    const [row] = await sql`select syncing_since from bank_item where id=${item.id}`;
+    expect(row.syncing_since).toBeNull();
+    expect(await sql`select 1 from bank_item_secret where item_id=${item.id}`).toHaveLength(1);
+    await bank.disconnectItem(alice, item.id, providerOf(stub));
+    expect(stub.removed).toBe(true);
+    expect(await sql`select 1 from bank_item where id=${item.id}`).toHaveLength(0);
+  });
+
+  it("rewraps the stored blob under the current key the first time the token is used after a rotation", async () => {
+    const envelope = await import("@/lib/crypto/envelope");
+    const stub = plaidStub();
+    const { item } = await connect(stub);
+    const [before] = await sql`select blob, kid from bank_item_secret where item_id=${item.id}`;
+    const oldKey = process.env.TOKEN_ENC_KEY!;
+    const newKey = randomBytes(32).toString("base64");
+    process.env.TOKEN_ENC_KEY = newKey; process.env.TOKEN_ENC_KEY_PREVIOUS = oldKey;
+    try {
+      const newId = envelope.validateEncryptionEnv().currentKeyId;
+      expect(newId).not.toBe(before.kid);
+      await secrets.withAccessToken(alice, item.id, async t => { expect(t).toBe(stub.accessToken); });
+      const [after] = await sql`select blob, kid from bank_item_secret where item_id=${item.id}`;
+      expect(after.kid).toBe(newId);
+      expect(Buffer.from(after.blob).toString("utf8").split(".")[1]).toBe(newId);
+      expect(Buffer.from(after.blob).equals(Buffer.from(before.blob))).toBe(false);
+      // The old key can now be retired.
+      delete process.env.TOKEN_ENC_KEY_PREVIOUS;
+      await secrets.withAccessToken(alice, item.id, async t => { expect(t).toBe(stub.accessToken); });
+      // Rewrap is owner-scoped: another user's call can't touch the row.
+      await expect(secrets.withAccessToken(bob, item.id, async t => t)).rejects.toMatchObject({ status: 409 });
+    } finally { process.env.TOKEN_ENC_KEY = oldKey; delete process.env.TOKEN_ENC_KEY_PREVIOUS; }
   });
 });

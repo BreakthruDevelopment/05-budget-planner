@@ -17,6 +17,8 @@ import { type BankProvider, type SyncPage, syncPage } from "./types";
  */
 export const PLAID_BASE_URL = "https://sandbox.plaid.com" as const;
 const TIMEOUT_MS = 10_000;
+/** The institution name is cosmetic, so its lookups get a short budget of their own. */
+const INSTITUTION_TIMEOUT_MS = 2_500;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const COUNTRY_CODES = ["US"];
 
@@ -32,7 +34,7 @@ export class PlaidError extends HttpError {
 }
 
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
-export type PlaidDeps = { fetch?: Fetch; timeoutMs?: number };
+export type PlaidDeps = { fetch?: Fetch; timeoutMs?: number; institutionTimeoutMs?: number };
 export type PlaidCredentials = { clientId: string; secret: string };
 
 const errorBody = z.object({ error_type: z.string().optional(), error_code: z.string().optional(), request_id: z.string().optional() });
@@ -99,9 +101,10 @@ async function readCapped(res: Response): Promise<string> {
 export function createPlaidProvider(creds: PlaidCredentials, deps: PlaidDeps = {}): BankProvider {
   const doFetch: Fetch = deps.fetch ?? ((input, init) => fetch(input, init));
   const timeoutMs = deps.timeoutMs ?? TIMEOUT_MS;
+  const institutionTimeoutMs = Math.min(deps.institutionTimeoutMs ?? INSTITUTION_TIMEOUT_MS, timeoutMs);
 
-  async function call<S extends z.ZodType>(path: string, body: Record<string, unknown>, schema: S, signal?: AbortSignal): Promise<z.infer<S>> {
-    const timeout = AbortSignal.timeout(timeoutMs);
+  async function call<S extends z.ZodType>(path: string, body: Record<string, unknown>, schema: S, signal?: AbortSignal, limitMs = timeoutMs): Promise<z.infer<S>> {
+    const timeout = AbortSignal.timeout(limitMs);
     let res: Response;
     let text: string;
     try {
@@ -150,16 +153,16 @@ export function createPlaidProvider(creds: PlaidCredentials, deps: PlaidDeps = {
     },
     async exchange(publicToken) {
       const r = await call("/item/public_token/exchange", { public_token: publicToken }, exchangeResponse);
-      // The name is cosmetic: any failure here must not lose the item we just created.
-      let institutionName = "Plaid Sandbox";
+      // Return at once so the caller can store the token before anything else happens; the name is looked up later.
+      return { itemId: r.item_id, institutionName: "Plaid Sandbox", accessToken: r.access_token };
+    },
+    async lookupInstitution(accessToken) {
       try {
-        const item = await call("/item/get", { access_token: r.access_token }, itemGetResponse);
-        if (item.item.institution_id) {
-          const inst = await call("/institutions/get_by_id", { institution_id: item.item.institution_id, country_codes: COUNTRY_CODES }, institutionResponse);
-          institutionName = clip(inst.institution.name, 80) || institutionName;
-        }
-      } catch { /* already logged with codes only */ }
-      return { itemId: r.item_id, institutionName, accessToken: r.access_token };
+        const item = await call("/item/get", { access_token: accessToken }, itemGetResponse, undefined, institutionTimeoutMs);
+        if (!item.item.institution_id) return null;
+        const inst = await call("/institutions/get_by_id", { institution_id: item.item.institution_id, country_codes: COUNTRY_CODES }, institutionResponse, undefined, institutionTimeoutMs);
+        return clip(inst.institution.name, 80) || null;
+      } catch { return null; /* already logged with codes only */ }
     },
     async sync(accessToken, cursor, count, signal) {
       if (!accessToken) throw new PlaidError("MISSING_TOKEN", "CLIENT", null, 500);

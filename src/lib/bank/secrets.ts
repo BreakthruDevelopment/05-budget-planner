@@ -1,10 +1,11 @@
 import "server-only";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { type Actor, assertCan } from "@/lib/auth/rbac";
-import { decrypt, encrypt, rowAad, validateEncryptionEnv } from "@/lib/crypto/envelope";
+import { decrypt, encrypt, needsRewrap, rewrap, rowAad, validateEncryptionEnv } from "@/lib/crypto/envelope";
 import { db, schema } from "@/lib/db";
 import { ConflictError } from "@/lib/errors";
+import { log } from "@/lib/log";
 import { ownedBy } from "@/lib/owned";
 import type { Tx } from "@/lib/usage";
 
@@ -38,10 +39,30 @@ export async function withAccessToken<T>(actor: Actor, itemId: string, fn: (toke
   const [row] = await db().select({ itemId: bankItemSecret.itemId, ownerId: bankItemSecret.ownerId, blob: bankItemSecret.blob }).from(bankItemSecret)
     .where(ownedBy(bankItemSecret, actor, eq(bankItemSecret.itemId, id)));
   if (!row) throw new MissingSecretError();
-  let token: string | undefined = decrypt(row.blob.toString("utf8"), secretAad(row.itemId, row.ownerId));
+  const stored = row.blob.toString("utf8");
+  let token: string | undefined = decrypt(stored, secretAad(row.itemId, row.ownerId));
+  await rewrapIfStale(actor, row.itemId, row.blob, stored);
   try {
     return await fn(token);
   } finally {
     token = undefined;
+  }
+}
+
+/**
+ * After a key rotation, move the blob's data key under the current KEK the first time the token is used, so old
+ * keys can be retired without a batch job. Best effort and compare-and-set on the old blob: a failure or a
+ * concurrent rewrite never blocks the caller, and the plaintext is not involved.
+ */
+async function rewrapIfStale(actor: Actor, itemId: string, oldBlob: Buffer, stored: string): Promise<void> {
+  try {
+    if (!needsRewrap(stored)) return;
+    const next = rewrap(stored);
+    const { bankItemSecret } = schema;
+    await db().update(bankItemSecret).set({ blob: Buffer.from(next, "utf8"), kid: validateEncryptionEnv().currentKeyId })
+      .where(and(ownedBy(bankItemSecret, actor, eq(bankItemSecret.itemId, itemId)), eq(bankItemSecret.blob, oldBlob)));
+    log.info("bank.secret.rewrapped", { provider: "plaid" });
+  } catch {
+    log.warn("bank.secret.rewrap_failed", { provider: "plaid" });
   }
 }

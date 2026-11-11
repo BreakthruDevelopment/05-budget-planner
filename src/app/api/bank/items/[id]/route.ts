@@ -3,6 +3,7 @@ import { requireSameOrigin } from "@/lib/csrf";
 import { errorResponse } from "@/lib/http";
 import { getItem, disconnectItem } from "@/lib/bank/items";
 export const dynamic = "force-dynamic";
+export const maxDuration = 25;
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const actor = await requireUser();

@@ -34,16 +34,30 @@ describe("plaid client (mocked fetch)", () => {
     expect(id).not.toContain("user-123");
   });
 
-  it("exchanges a public token and names the institution; a failing name lookup keeps the item", async () => {
+  it("exchange returns at once, with no institution lookup, so the token can be stored first", async () => {
     const stub = plaidStub();
     const ok = await createPlaidProvider(creds, { fetch: stub.fetch }).exchange(PUBLIC_TOKEN);
-    expect(ok).toEqual({ itemId: stub.itemId, institutionName: "First Platypus Bank", accessToken: stub.accessToken });
+    expect(ok).toEqual({ itemId: stub.itemId, institutionName: "Plaid Sandbox", accessToken: stub.accessToken });
+    expect(stub.calls.map(c => c.path)).toEqual(["/item/public_token/exchange"]);
+  });
 
-    const stub2 = plaidStub();
-    stub2.failures.push({ path: "/item/get", code: "INTERNAL_SERVER_ERROR", status: 500 });
-    const fallback = await createPlaidProvider(creds, { fetch: stub2.fetch }).exchange(PUBLIC_TOKEN);
-    expect(fallback.institutionName).toBe("Plaid Sandbox");
-    expect(fallback.accessToken).toBe(stub2.accessToken);
+  it("looks the institution name up separately, and a failure or slow answer just yields null", async () => {
+    const stub = plaidStub();
+    expect(await createPlaidProvider(creds, { fetch: stub.fetch }).lookupInstitution!(stub.accessToken)).toBe("First Platypus Bank");
+
+    captureLogs();
+    const failing = plaidStub();
+    failing.failures.push({ path: "/item/get", code: "INTERNAL_SERVER_ERROR", status: 500 });
+    expect(await createPlaidProvider(creds, { fetch: failing.fetch }).lookupInstitution!(failing.accessToken)).toBeNull();
+
+    // A hanging lookup is cut off by its own short timeout, not the 10 s request timeout.
+    const started = Date.now();
+    const hang = createPlaidProvider(creds, {
+      institutionTimeoutMs: 30,
+      fetch: (_url, init) => new Promise((_, reject) => init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "TimeoutError")))),
+    });
+    expect(await hang.lookupInstitution!("t")).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("pages /transactions/sync by cursor and maps Plaid fields to ours", async () => {
