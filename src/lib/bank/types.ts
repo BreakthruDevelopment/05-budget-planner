@@ -15,4 +15,6 @@ export interface BankProvider {
   exchange(publicToken: string): Promise<{ itemId: string; institutionName: string; accessToken: string | null }>;
   sync(accessToken: string | null, cursor: string | null, count: number, signal?: AbortSignal): Promise<SyncPage>;
   remove(accessToken: string | null): Promise<void>;
+  /** Optional, best effort and short: a cosmetic name for the institution, looked up after the token is safely stored. */
+  lookupInstitution?(accessToken: string): Promise<string | null>;
 }

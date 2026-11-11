@@ -34,6 +34,15 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'origin: https://s
 code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR_A" -H "origin: $BASE_URL" -H 'content-type: application/json' --data-binary "$(node -e 'console.log(JSON.stringify({padding:"x".repeat(17000)}))')" "$BASE_URL/api/bank/items")
 [ "$code" = 413 ] || fail "large body: $code"
 pass "anonymous, cross-origin and oversized requests refused"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/api/bank/link-token")
+[ "$code" = 401 ] || fail "anonymous link-token: $code"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -b "$JAR_A" -H 'origin: https://sibling.breakthruventures.ai' "$BASE_URL/api/bank/link-token")
+[ "$code" = 403 ] || fail "cross-origin link-token: $code"
+code=$(curl -sS -o "$BODY" -w '%{http_code}' -X POST -b "$JAR_A" -H "origin: $BASE_URL" "$BASE_URL/api/bank/link-token")
+[ "$code" = 409 ] || fail "link-token without Plaid keys should be 409: $code"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR_A" -H "origin: $BASE_URL" -H 'content-type: application/json' -d '{"publicToken":"public-sandbox-00000000-1111"}' "$BASE_URL/api/bank/items")
+[ "$code" = 409 ] || fail "Plaid connect without keys should be 409: $code"
+pass "Plaid routes refuse anonymous and cross-origin calls, and stay off in demo mode"
 connected=$(curl -fsS -b "$JAR_A" -H "origin: $BASE_URL" -H 'content-type: application/json' -d '{"demo":true}' "$BASE_URL/api/bank/items") || fail "demo connect"
 item_id=$(echo "$connected" | field item.id)
 items=$(curl -fsS -b "$JAR_A" "$BASE_URL/api/bank/items")
